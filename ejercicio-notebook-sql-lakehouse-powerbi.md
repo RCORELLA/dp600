@@ -1,6 +1,8 @@
 # Ejercicio extra: de una base de datos SQL a un informe de Power BI, pasando por un notebook y un lakehouse
 
-> ⚠️ **Este ejercicio NO forma parte del temario oficial del examen DP-600.** El elemento "SQL database in Microsoft Fabric" está explícitamente fuera de alcance del curso oficial (aparece como *"Not Taught"* en el módulo *Choose data stores*). Se ha creado como práctica adicional para reforzar, en un solo flujo de principio a fin, conceptos que sí entran en el examen: notebooks de Spark, tablas Delta en un lakehouse, y modelos semánticos con Direct Lake.
+> ⚠️ **Este ejercicio NO forma parte del temario oficial del examen DP-600.** El elemento "SQL database in Microsoft Fabric" está explícitamente fuera de alcance del curso oficial (aparece como *"Not Taught"* en el módulo *Choose data stores*). Se ha creado como práctica adicional para reforzar, en un solo flujo de principio a fin, conceptos que sí entran en el examen: notebooks, tablas Delta en un lakehouse, y modelos semánticos con Direct Lake.
+
+> 📝 **Nota de la versión 2:** la primera versión de este ejercicio usaba una conexión JDBC clásica (`spark.read.format("jdbc")` + `notebookutils.credentials.getToken`) para leer la SQL database desde el notebook. En la práctica, esa conexión **falla** con `Login failed` — es un problema conocido y reportado en la comunidad, que Microsoft tiene marcado como *"Planned"* (no soportado todavía). Esta versión sustituye ese paso por el comando mágico **`%%tsql`**, que sí funciona, y añade las correcciones necesarias en la escritura del Delta. Todo lo indicado a continuación está verificado contra un notebook que se ha ejecutado con éxito de principio a fin.
 
 ## Qué vas a construir
 
@@ -8,10 +10,10 @@ Un flujo completo de analítica de extremo a extremo, usando **solo recursos den
 
 ```
 SQL database en Fabric (datos de ventas)
-        │  JDBC + token de Entra ID
+        │  comando mágico %%tsql
         ▼
-   Notebook (PySpark)
-        │  escribe tabla Delta
+   Notebook (lenguaje Python, no PySpark)
+        │  pandas → Polars → write_delta (ruta ABFS + token)
         ▼
      Lakehouse
         │
@@ -24,7 +26,7 @@ SQL database en Fabric (datos de ventas)
 
 ## Duración estimada
 
-Entre 45 y 60 minutos, dependiendo de tu familiaridad con Spark y Power BI Desktop.
+Entre 45 y 60 minutos, dependiendo de tu familiaridad con notebooks y Power BI Desktop.
 
 ## Prerrequisitos
 
@@ -59,6 +61,7 @@ Entre 45 y 60 minutos, dependiendo de tu familiaridad con Spark y Power BI Deskt
 Antes de pasar al notebook, puedes echar un vistazo con una consulta rápida. En **Home** → **New query**, pega y ejecuta:
 
 ```sql
+-- Esto es un comentario en T-SQL (dos guiones)
 SELECT
     p.Name AS ProductName,
     pc.Name AS CategoryName,
@@ -73,16 +76,7 @@ ORDER BY
 
 ---
 
-## Paso 3 — Obtener el connection string de la base de datos
-
-1. En la página de la base de datos `AdventureWorksLT`, selecciona el icono de configuración (**⚙️ Settings**) o el menú **"..."**.
-2. Busca la sección **Connection strings** (o **Cadenas de conexión**).
-3. Copia el **servidor SQL** (tendrá una forma parecida a `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx.database.fabric.microsoft.com`).
-4. Guárdalo en un bloc de notas — lo necesitarás en el Paso 6.
-
----
-
-## Paso 4 — Crear el lakehouse de destino
+## Paso 3 — Crear el lakehouse de destino
 
 1. Vuelve al workspace y selecciona **+ New item**.
 2. Selecciona **Lakehouse**, dale el nombre `lh_ventas` y selecciona **Create**.
@@ -90,105 +84,113 @@ ORDER BY
 
 ---
 
-## Paso 5 — Crear el notebook
+## Paso 4 — Crear el notebook
 
 1. En el workspace, selecciona **+ New item** → **Notebook**.
 2. Dale un nombre, por ejemplo `nb_carga_ventas`.
-3. En el panel del explorador (a la izquierda del notebook), selecciona **Add data items** o **Lakehouses** → **Add** → elige `lh_ventas` para adjuntarlo como lakehouse por defecto del notebook.
+3. **Importante:** este notebook necesita que su lenguaje por defecto sea **Python** (no PySpark). Compruébalo/cámbialo en el desplegable de lenguaje de la celda — si ves `PySpark (Python)`, cámbialo a `Python`. El comando mágico `%%tsql` del siguiente paso solo funciona en notebooks de Python.
+4. No hace falta adjuntar el lakehouse todavía como valor por defecto: la escritura del Paso 7 usa una ruta completa (ABFS), así que basta con tenerlo creado.
 
 ---
 
-## Paso 6 — Conectar por JDBC usando tu identidad de Fabric
+## Paso 5 — Consultar la SQL database con el comando mágico `%%tsql`
 
-En la primera celda del notebook, pega el siguiente código. **No necesitas usuario ni contraseña** — se usa el token de tu propia sesión de Fabric (Entra ID), que ya tiene acceso a la base de datos porque la creaste en el mismo tenant.
+En lugar de una conexión JDBC manual, Fabric ofrece un comando mágico que ejecuta T-SQL directamente contra tu SQL database y vuelca el resultado en un DataFrame de pandas.
 
 ```python
-# Celda 1 — Obtener un token de autenticación para SQL
-token = notebookutils.credentials.getToken("https://database.windows.net/")
+# Celda 1 - Consultar la SQL database con el comando mágico oficial
+%%tsql -artifact AdventureWorksLT -type SQLDatabase -bind df_ventas
+SELECT * FROM SalesLT.SalesOrderHeader;
+```
 
-servidor = "<PEGA_AQUI_TU_SERVIDOR>.database.fabric.microsoft.com"  # del Paso 3
+> ⚠️ **Sintaxis:** `-artifact` es el nombre de tu SQL database (aquí `AdventureWorksLT`, del Paso 2), `-type SQLDatabase` indica el tipo de artefacto, y `-bind` es el nombre de la variable de Python donde quedará el resultado como DataFrame de pandas. La consulta T-SQL va en la línea siguiente.
 
-jdbc_url = (
-    f"jdbc:sqlserver://{servidor}:1433;"
-    "database=AdventureWorksLT;encrypt=true;trustServerCertificate=false;"
-    "hostNameInCertificate=*.database.fabric.microsoft.com;loginTimeout=30"
+```python
+# Celda 2 — Comprobar qué tipo de objeto te ha devuelto
+print(type(df_ventas))
+df_ventas.head()
+```
+
+Repite el patrón para traer también clientes y productos:
+
+```python
+# Celda 3 y 4 — Traer también clientes y productos
+%%tsql -artifact AdventureWorksLT -type SQLDatabase -bind df_clientes
+SELECT * FROM SalesLT.Customer;
+```
+
+```python
+%%tsql -artifact AdventureWorksLT -type SQLDatabase -bind df_productos
+SELECT * FROM SalesLT.Product;
+```
+
+> ⚠️ **Si la consulta sobre `SalesLT.Product` falla** con un error relacionado con codificación/UTF-8 al leer alguna columna de texto larga, puedes omitir esa tabla sin problema — no es necesaria para el resto del ejercicio, que se centra en `ventas` y `clientes`.
+
+---
+
+## Paso 6 — (Opcional) Una pequeña transformación antes de guardar
+
+Aprovecha para practicar una unión de tablas con pandas:
+
+```python
+# Celda 5 -> unir ventas con clientes
+df_enriquecido = df_ventas.merge(
+    df_clientes,
+    on="CustomerID",
+    how="left",
+    suffixes=("", "_cliente")
 )
+df_enriquecido.head()
 ```
+
+Si vas a escribir en Delta un DataFrame que tenga columnas de texto totalmente vacías (por ejemplo `MiddleName` o `Suffix` en `SalesLT.Customer`), conviene forzarlas a tipo `string` explícito antes de escribir — si no, Delta puede rechazar la escritura (ver la tabla de solución de problemas):
 
 ```python
-# Celda 2 — Leer la tabla de pedidos de venta
-df_ventas = (spark.read
-    .format("jdbc")
-    .option("url", jdbc_url)
-    .option("dbtable", "SalesLT.SalesOrderHeader")
-    .option("accessToken", token)
-    .load())
-
-display(df_ventas)
+# Convierte todas las columnas de texto (incluidas las vacías) a un tipo string explícito
+cols_texto = df_enriquecido.select_dtypes(include="object").columns
+df_enriquecido[cols_texto] = df_enriquecido[cols_texto].astype("string")
 ```
 
-> ⚠️ **Si la celda 2 falla:** revisa primero que el nombre del servidor del Paso 3 esté copiado sin espacios ni comillas de más. Si el error menciona permisos, confirma que tu usuario tiene rol de propietario o colaborador sobre el workspace donde vive la base de datos. Este patrón de conexión no forma parte del temario oficial, así que tómate un momento para probarlo con calma antes de usarlo en directo delante de un grupo.
-
-```python
-# Celda 3 — Leer también clientes y productos
-df_clientes = (spark.read.format("jdbc")
-    .option("url", jdbc_url)
-    .option("dbtable", "SalesLT.Customer")
-    .option("accessToken", token)
-    .load())
-
-df_productos = (spark.read.format("jdbc")
-    .option("url", jdbc_url)
-    .option("dbtable", "SalesLT.Product")
-    .option("accessToken", token)
-    .load())
-```
+> 💡 Este paso es opcional para el flujo mínimo (el Paso 7 escribe `df_ventas` tal cual), pero es imprescindible si decides guardar `df_enriquecido` o cualquier DataFrame con columnas de texto vacías.
 
 ---
 
-## Paso 7 — (Opcional) Una pequeña transformación antes de guardar
+## Paso 7 — Escribir la tabla Delta en el lakehouse
 
-Aprovecha para practicar lo visto en el módulo de notebooks: une ventas con clientes usando un `join`, y añade una columna calculada.
+Aquí está el cambio más importante respecto al planteamiento original: **no se escribe con `saveAsTable` de Spark**, sino con **Polars**, apuntando a una **ruta ABFS completa** dentro de OneLake (una ruta relativa tipo `/lakehouse/default/Tables/...` puede fallar al no poder completar el "rename" atómico que exige Delta).
 
 ```python
-from pyspark.sql.functions import col
+# Construir la ruta de OneLake y las credenciales de escritura
+workspace = "<NOMBRE_DE_TU_WORKSPACE>"      # el workspace del Paso 1
+lakehouse = "lh_ventas.Lakehouse"           # el lakehouse del Paso 3 (con el sufijo .Lakehouse)
 
-df_ventas_enriquecido = (
-    df_ventas
-    .join(df_clientes, df_ventas.CustomerID == df_clientes.CustomerID, "left")
-    .select(
-        df_ventas.SalesOrderID,
-        df_ventas.OrderDate,
-        df_ventas.SubTotal,
-        df_clientes.FirstName,
-        df_clientes.LastName
-    )
-)
+path = f"abfss://{workspace}@onelake.dfs.fabric.microsoft.com/{lakehouse}/Tables/ventas"
 
-display(df_ventas_enriquecido)
+storage_options = {
+    "bearer_token": notebookutils.credentials.getToken("storage"),
+    "use_fabric_endpoint": "true",
+}
 ```
+
+```python
+import polars as pl
+
+pl_df = pl.from_pandas(df_ventas)
+pl_df.write_delta(path, mode="overwrite", storage_options=storage_options)
+```
+
+> 💡 Repite el mismo patrón (cambiando el nombre de tabla en la ruta y el DataFrame de origen) para guardar `df_clientes` y, si la obtuviste, `df_productos`. Si prefieres guardar la versión unida y con columnas de texto corregidas, usa `df_enriquecido` en lugar de `df_ventas`.
+
+Ve al lakehouse `lh_ventas` y actualiza el explorador de tablas (botón de refrescar) — deberías ver `ventas` (y el resto de tablas que hayas escrito) bajo **Tables**.
 
 ---
 
-## Paso 8 — Escribir las tablas Delta en el lakehouse
-
-```python
-# Celda final — Guardar como tablas Delta gestionadas del lakehouse
-df_ventas_enriquecido.write.format("delta").mode("overwrite").saveAsTable("ventas")
-df_clientes.write.format("delta").mode("overwrite").saveAsTable("clientes")
-df_productos.write.format("delta").mode("overwrite").saveAsTable("productos")
-```
-
-Ve al lakehouse `lh_ventas` y actualiza el explorador de tablas (botón de refrescar) — deberías ver `ventas`, `clientes` y `productos` bajo **Tables**.
-
----
-
-## Paso 9 — Crear el modelo semántico
+## Paso 8 — Crear el modelo semántico
 
 1. Abre el lakehouse `lh_ventas`.
 2. En la barra superior, selecciona **New semantic model** (o usa el modelo semántico por defecto que Fabric ya creó automáticamente junto con el lakehouse).
-3. Añade las tres tablas: `ventas`, `clientes`, `productos`.
-4. En la vista de modelo, crea la relación `ventas.CustomerID` → `clientes.CustomerID` (uno a muchos).
+3. Añade la tabla `ventas` (y `clientes`/`productos` si las escribiste).
+4. Si escribiste tablas separadas, en la vista de modelo crea la relación `ventas.CustomerID` → `clientes.CustomerID` (uno a muchos).
 5. (Opcional) Crea una medida sencilla en DAX:
 
    ```dax
@@ -201,11 +203,11 @@ Ve al lakehouse `lh_ventas` y actualiza el explorador de tablas (botón de refre
 
 ---
 
-## Paso 10 — Abrir en Power BI Desktop
+## Paso 9 — Abrir en Power BI Desktop
 
 1. En Fabric, sobre el modelo semántico, selecciona **"Open in Power BI Desktop live connect"** (o similar, según tu versión).
 2. Se abrirá Power BI Desktop conectado en vivo a tu modelo semántico.
-3. Crea una visualización rápida: un gráfico de columnas con `Total Ventas` por `LastName`, por ejemplo.
+3. Crea una visualización rápida: un gráfico de columnas con `Total Ventas` por cliente, por ejemplo.
 4. Guarda el informe (`.pbix`) si quieres conservarlo.
 
 ---
@@ -213,9 +215,9 @@ Ve al lakehouse `lh_ventas` y actualiza el explorador de tablas (botón de refre
 ## Resumen de lo que has practicado
 
 - Crear una base de datos SQL operacional dentro de Fabric, sin infraestructura externa.
-- Conectar un notebook Spark a una fuente SQL vía JDBC, autenticando con tu propia identidad de Fabric (sin usuario/contraseña sueltos).
-- Transformar datos con PySpark (`join`, selección de columnas).
-- Escribir tablas Delta gestionadas en un lakehouse.
+- Consultar una SQL database de Fabric desde un notebook usando el comando mágico `%%tsql`, sin gestionar tokens ni cadenas de conexión a mano.
+- Transformar datos con pandas (`merge`, casteo de tipos).
+- Escribir tablas Delta en un lakehouse usando Polars y una ruta ABFS explícita con token de OneLake.
 - Construir un modelo semántico con relaciones y una medida DAX sobre Direct Lake.
 - Consumir ese modelo en un informe de Power BI.
 
@@ -233,7 +235,10 @@ Si has terminado de practicar y no quieres conservar estos elementos:
 
 | Problema | Causa probable | Solución |
 |---|---|---|
-| `Login failed` al ejecutar la celda del JDBC | El token ha caducado o el servidor está mal copiado | Vuelve a ejecutar la celda del token; revisa que el nombre del servidor no tenga espacios |
+| `Py4JJavaError` / `Login failed` al leer con `spark.read.format("jdbc")` | La SQL database de Fabric no admite (todavía) tokens de `notebookutils.credentials.getToken` para JDBC — es un problema conocido, marcado por Microsoft como *"Planned"* | Sustituye la conexión JDBC por el comando mágico `%%tsql -artifact <nombre> -type SQLDatabase -bind <variable>` |
+| `UsageError: Cell magic '%%tsql' not found` | El notebook está en modo PySpark, no en Python | Cambia el lenguaje del notebook a **Python** en el desplegable de lenguaje |
+| `Schema error: Invalid data type for Delta Lake: Null` al hacer `write_delta` | Una columna del DataFrame es completamente nula (por ejemplo `MiddleName`, `Suffix`) y Delta no sabe qué tipo asignarle | Antes de escribir, convierte las columnas de tipo `object` a `string` explícito: `df[cols].astype("string")` |
+| `Generic LocalFileSystem error ↳ Unable to rename file ↳ Operation not permitted (os error 1)` | Se ha usado una ruta relativa tipo `/lakehouse/default/Tables/...`, que no soporta el rename atómico que necesita Delta | Usa la ruta ABFS completa (`abfss://{workspace}@onelake.dfs.fabric.microsoft.com/{lakehouse}.Lakehouse/Tables/{tabla}`) junto con `storage_options` que incluya el `bearer_token` de `notebookutils.credentials.getToken("storage")` y `"use_fabric_endpoint": "true"` |
 | No aparece la tarjeta "Sample data" al crear la base de datos | La base de datos aún se está aprovisionando | Espera unos segundos y refresca la página |
 | Las tablas no aparecen en el lakehouse tras escribirlas | El explorador de tablas no se ha refrescado | Usa el botón de refrescar (⟳) en el panel de **Tables** |
 | El modelo semántico no refleja los últimos datos | Direct Lake cachea agresivamente en algunos casos | En el modelo semántico, usa **Refresh** manual |
@@ -243,3 +248,4 @@ Si has terminado de practicar y no quieres conservar estos elementos:
 - Laboratorio oficial en el que se basa la parte de la base de datos: [Work with SQL Database in Microsoft Fabric](https://microsoftlearning.github.io/mslearn-fabric/Instructions/Labs/20-work-with-database.html)
 - [Documentación de Fabric notebooks](https://learn.microsoft.com/fabric/data-engineering/how-to-use-notebook)
 - [SQL database en Microsoft Fabric](https://learn.microsoft.com/fabric/database/sql/overview)
+- [Comando mágico %%tsql en notebooks de Fabric](https://learn.microsoft.com/fabric/database/sql/query-with-python-notebooks)
